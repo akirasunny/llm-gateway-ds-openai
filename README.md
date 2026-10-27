@@ -33,6 +33,24 @@ Use one worker. Templates, trace history, and model limiters are in memory and r
 API documentation is at http://127.0.0.1:8000/docs.
 If `GATEWAY_API_KEY` is set, supply `Authorization: Bearer <gateway-key>` on all API requests.
 
+## Directory structure
+
+```text
+llm-gateway/
+├── gateway/
+│   ├── main.py          # App setup, provider wiring, and authentication
+│   ├── models.py        # Request, response, and usage contracts
+│   ├── providers.py     # Chat Completions and Responses adapters
+│   ├── api/             # HTTP routes and SSE responses
+│   ├── core/            # Errors, rate limits, retries, and request context
+│   └── services/        # Orchestration, prompts, output validation, and traces
+├── scripts/             # Validation runner, including optional live checks
+├── tests/               # Gateway and provider tests with mocked calls
+├── .env.example         # Environment configuration template
+├── pyproject.toml       # Dependencies and project configuration
+└── README.md
+```
+
 ## Examples
 
 Complete response:
@@ -53,7 +71,73 @@ curl -N http://127.0.0.1:8000/v1/llm \
 
 Events are SSE `data:` JSON with `type` equal to `content.delta`, `response.completed`, or `response.failed`. Every event carries the same request ID. Terminal success includes selected model, usage, and time to first content token. Errors before the first content event retain HTTP status; after content begins they are stream events. No retry or fallback occurs after content is emitted.
 
-Structured JSON and a versioned prompt:
+### Structured response: classify a support message
+
+Ask the model to return a category and an urgency flag in a defined JSON shape:
+
+```bash
+curl http://127.0.0.1:8000/v1/llm \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Classify this support message: I was charged twice for my subscription. Please fix this immediately."
+      }
+    ],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "support_classification",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "enum": ["billing", "technical", "other"]
+            },
+            "urgent": {
+              "type": "boolean"
+            }
+          },
+          "required": ["category", "urgent"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }'
+```
+
+Add `-H 'Authorization: Bearer <gateway-key>'` if `GATEWAY_API_KEY` is enabled.
+The schema requires both fields, restricts `category` to the three listed values, requires a boolean `urgent`, and forbids extra fields.
+
+An illustrative response, with metadata omitted:
+
+```json
+{
+  "model": "deepseek-v4-flash",
+  "content": "{\"category\":\"billing\",\"urgent\":true}",
+  "parsed": {
+    "category": "billing",
+    "urgent": true
+  }
+}
+```
+
+`content` is the model's raw text; `parsed` is the JSON object parsed and validated by the gateway. Your application can use the validated fields directly:
+
+```python
+result = response.json()
+
+if result["parsed"]["category"] == "billing":
+    route_to_billing_team()
+```
+
+For DeepSeek, the gateway enables JSON mode and adds the schema to the model's instructions, then validates the returned JSON locally. An answer containing `"urgent": "yes"` fails validation and returns an `invalid_structured_output` error instead of a successful result. Validation guarantees the shape of an accepted answer, not the correctness of its classification.
+
+### Structured JSON and a versioned prompt
 
 ```json
 {
